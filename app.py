@@ -105,7 +105,11 @@ def run_simulated_dml_query(dml_sql: str, action: str):
             dml_sql.strip().upper().startswith("DELETE") or \
             dml_sql.strip().upper().startswith("UPDATE")):
         return f"Error: The provided command for {action} does not appear to be valid DML."
-    return f"Successfully (simulated) {action} data. No actual changes were made to the database in this demo."
+    action_verb_present_tense = action
+    if action == "add": action_verb_present_tense = "adding"
+    elif action == "delete": action_verb_present_tense = "deleting"
+    elif action == "update": action_verb_present_tense = "updating"
+    return f"Successfully (simulated) {action_verb_present_tense} data. No actual changes were made to the database in this demo."
 
 sql_intent_prompt_template_str = """
 You are an advanced AI assistant. Analyze the user's question and database schema. Respond in JSON.
@@ -125,7 +129,11 @@ JSON output must contain "response_type".
     Set "response_type": "DATABASE_OVERVIEW_REQUEST".
     Set "ai_response": "Let me provide an overview of this database."
 
-4.  If general greeting or too ambiguous for any of the above:
+5. If the question is a general knowledge query unrelated to the database schema (e.g., "What is the capital of France?", "Explain black holes"):
+    Set "response_type": "GENERAL_KNOWLEDGE_QUERY".
+    Set "ai_response": "Your direct answer to the general knowledge question."
+
+6.  If general greeting or too ambiguous for any of the above:
     Set "response_type": "GENERAL_RESPONSE".
     Set "ai_response": "Your conversational reply or request for more clarity."
 
@@ -151,10 +159,10 @@ Your task is to:
 Respond in JSON format with the following fields:
     "response_type": "DML_GUIDANCE_PROVIDED",
     "target_table": "`identified_table_name_value` (your best guess for the table name, or 'Unknown' if too vague)",
-    "suggested_fields": ["field1_name", "field2_name", ...] (a list of key field names for `identified_table_name_value` relevant to the action; empty list if target_table is Unknown or no specific fields are obvious),
-    "guidance_text": "A string like: 'To {action_type} data for table `identified_table_name_value`, please provide details for the following fields, or describe using a text template.' (Construct this string replacing `identified_table_name_value` with the actual table name you identified. If table is Unknown, provide a generic message.)",
-    "fields_template_text": "For ADD: 'Column1=Value1, Column2=Value2, ...'. For DELETE: 'Specify conditions like Column1=Value1 AND Column2=Value2 to identify records.'",
-    "example_text": "A string like: 'Example for {action_type} on `identified_table_name_value`: [Provide a short, concrete example...]' (Construct this string replacing `identified_table_name_value` with the actual table name you identified)"
+    "suggested_fields": ["field1_name", "field2_name", ...] (a list of key field names for `identified_table_name_value` relevant to the action. For UPDATE, this might include fields for SET and WHERE. Or provide two separate lists like "set_fields" and "where_fields"),
+    "guidance_text": "A string like: 'To {action_type} data for table `identified_table_name_value`, please provide details for the following fields, or describe using a text template.' (Construct this string replacing `identified_table_name_value` with the actual table name you identified. If table is Unknown, provide a generic message. For UPDATE, specify needing SET values and WHERE conditions.)",
+    "fields_template_text": "For ADD: 'Column1=Value1, Column2=Value2, ...'. For DELETE: 'Specify conditions like Column1=Value1 AND Column2=Value2 to identify records.' For UPDATE: 'SET ColumnToUpdate1=NewValue1, ColumnToUpdate2=NewValue2 WHERE ConditionColumn1=ConditionValue1 AND ConditionColumn2=ConditionValue2'",
+    "example_text": "A string like: 'Example for {action_type} on `identified_table_name_value`: [Provide a short, concrete example...]' (Construct this string replacing `identified_table_name_value` with the actual table name you identified. For UPDATE, show example SET and WHERE.)"
 
 If the initial description is too vague to identify a target table:
     Set "target_table": "Unknown".
@@ -175,7 +183,8 @@ Database Schema: {schema}
 Instructions:
 1.  For DELETE: A WHERE clause is MANDATORY. If details are insufficient for a safe WHERE clause, respond: "Error generating DML: Deletion criteria are too vague or unsafe. Please provide specific identifiers."
 2.  For INSERT: Ensure all necessary non-nullable columns (without defaults) are covered. If critical info is missing, respond: "Error generating DML: Missing critical information for insert: [list missing fields, e.g., 'ColumnName']."
-3.  Output ONLY the SQL DML statement or an error message starting with "Error generating DML:".
+3.  For UPDATE: A WHERE clause is MANDATORY. If details for WHERE are insufficient/unsafe, respond: "Error generating DML: Update criteria are too vague or unsafe. Please provide specific identifiers for the WHERE clause." Ensure SET assignments are clear.
+4.  Output ONLY the SQL DML statement or an error message starting with "Error generating DML:".
 
 SQL {action_type} Statement or Error:
 """
@@ -186,6 +195,10 @@ User Question: {question}
 Generated SQL Query: {generated_sql}
 SQL Query Result: {sql_response}
 Provide a concise natural language answer. If empty, state no data found. If error, mention it.
+After the answer, if relevant based on the user's question and the SQL response, you can also suggest 1 or 2 logical follow-up questions or actions the user might find helpful.
+For example, if the user asked for customers in a city, you might suggest they could ask for orders from one of those customers.
+Phrase this as a natural continuation of the conversation, like 'Would you like to see orders for any of these customers?' or 'You could also ask about the total number of albums for each artist listed.'
+Keep suggestions brief and directly related to the user's likely intent.
 Answer:
 """
 nl_response_prompt = ChatPromptTemplate.from_template(nl_response_prompt_template_str)
@@ -327,7 +340,7 @@ st.markdown("""
 st.title("SQL AI Assistant Pro+")
 
 st.markdown("### Quick Actions")
-cols = st.columns([1, 1, 1.5]) # Add, Delete, Summarize
+cols = st.columns([1, 1, 1, 1.5]) # Add, Update, Delete, Summarize
 if cols[0].button("➕ Add Data", use_container_width=True, key="add_data_button"):
     st.session_state.current_action = "add_data_initial_input"
     st.session_state.dml_initial_description = ""
@@ -336,7 +349,15 @@ if cols[0].button("➕ Add Data", use_container_width=True, key="add_data_button
     st.session_state.dml_guidance_message = None
     st.session_state.dml_input_method = None
     st.rerun()
-if cols[1].button("➖ Delete Data", use_container_width=True, key="delete_data_button"):
+if cols[1].button("🔄 Update Data", use_container_width=True, key="update_data_button"):
+    st.session_state.current_action = "update_data_initial_input"
+    st.session_state.dml_initial_description = ""
+    st.session_state.dml_form_inputs = {}
+    st.session_state.dml_text_details = ""
+    st.session_state.dml_guidance_message = None
+    st.session_state.dml_input_method = None
+    st.rerun()
+if cols[2].button("➖ Delete Data", use_container_width=True, key="delete_data_button"):
     st.session_state.current_action = "delete_data_initial_input"
     st.session_state.dml_initial_description = ""
     st.session_state.dml_form_inputs = {}
@@ -344,7 +365,7 @@ if cols[1].button("➖ Delete Data", use_container_width=True, key="delete_data_
     st.session_state.dml_guidance_message = None
     st.session_state.dml_input_method = None
     st.rerun()
-if cols[2].button("📊 Summarize Database", use_container_width=True, key="summarize_db_button"):
+if cols[3].button("📊 Summarize Database", use_container_width=True, key="summarize_db_button"):
     st.session_state.current_action = "summarize_db"
     st.rerun()
 st.markdown("---")
@@ -368,11 +389,18 @@ for key, default_val in [
 
 # --- UI for DML Stages ---
 # Stage 1: Get initial DML description
-if st.session_state.current_action in ["add_data_initial_input", "delete_data_initial_input"]:
-    action_verb = "Add" if "add" in st.session_state.current_action else "Delete"
+if st.session_state.current_action in ["add_data_initial_input", "delete_data_initial_input", "update_data_initial_input"]:
+    action_verb = "Add"
+    if "delete" in st.session_state.current_action: action_verb = "Delete"
+    elif "update" in st.session_state.current_action: action_verb = "Update"
+
     st.subheader(f"Describe Data to {action_verb}")
+    description_example = "e.g., 'add a new rock album by Test Band'"
+    if action_verb == "Delete": description_example = "e.g., 'delete customer with ID 123'"
+    elif action_verb == "Update": description_example = "e.g., 'update email for customer ID 123 to new@email.com'"
+
     st.session_state.dml_initial_description = st.text_area(
-        f"Briefly describe what you want to {action_verb.lower()} (e.g., 'add a new rock album by Test Band', 'delete customer with ID 123')",
+        f"Briefly describe what you want to {action_verb.lower()} ({description_example})",
         value=st.session_state.dml_initial_description, height=80, key=f"dml_init_desc_{action_verb}"
     )
     col1, col2 = st.columns([1,1])
@@ -387,8 +415,10 @@ if st.session_state.current_action in ["add_data_initial_input", "delete_data_in
             st.session_state.current_action = None; st.rerun()
 
 # Stage 2: Display guidance and offer input methods (Form or Text)
-elif st.session_state.current_action in ["awaiting_dml_input_method_add", "awaiting_dml_input_method_delete"]:
-    action_verb = "Add" if "add" in st.session_state.current_action else "Delete"
+elif st.session_state.current_action in ["awaiting_dml_input_method_add", "awaiting_dml_input_method_delete", "awaiting_dml_input_method_update"]:
+    action_verb = "Add"
+    if "delete" in st.session_state.current_action: action_verb = "Delete"
+    elif "update" in st.session_state.current_action: action_verb = "Update"
     guidance = st.session_state.dml_guidance_message
     if guidance:
         st.subheader(f"Provide Details for {action_verb} Operation")
@@ -420,12 +450,14 @@ elif st.session_state.current_action in ["awaiting_dml_input_method_add", "await
         st.session_state.current_action = None
 
 # Stage 2b: Input details (Form or Text)
-elif st.session_state.current_action in ["awaiting_structured_dml_details_add", "awaiting_structured_dml_details_delete"]:
-    action_verb = "Add" if "add" in st.session_state.current_action else "Delete"
+elif st.session_state.current_action in ["awaiting_structured_dml_details_add", "awaiting_structured_dml_details_delete", "awaiting_structured_dml_details_update"]:
+    action_verb = "Add"
+    if "delete" in st.session_state.current_action: action_verb = "Delete"
+    elif "update" in st.session_state.current_action: action_verb = "Update"
     guidance = st.session_state.dml_guidance_message
 
     if not guidance:
-        st.error("Error: DML guidance is missing. Please restart the Add/Delete action."); st.stop()
+        st.error(f"Error: DML guidance is missing. Please restart the {action_verb} action."); st.stop()
 
     st.subheader(f"Enter Details for {action_verb} on Table: `{guidance.get('target_table', 'Unknown')}`")
 
@@ -482,14 +514,27 @@ elif st.session_state.current_action in ["awaiting_structured_dml_details_add", 
 # Stage 3: DML Confirmation
 elif st.session_state.pending_dml_confirmation:
     action_verb = st.session_state.pending_dml_confirmation["action"]
-    dml_sql = st.session_state.pending_dml_confirmation["sql"]
+    # Retrieve the original AI-generated SQL
+    original_dml_sql = st.session_state.pending_dml_confirmation["sql"]
+
     st.warning(f"⚠️ **Confirm Database Modification: {action_verb.capitalize()} Data**")
-    st.markdown(f"The AI proposes the following SQL command:")
-    st.code(dml_sql, language="sql")
+    st.markdown(f"The AI proposes the following SQL command. You can review and edit it below before proceeding:")
+
+    # Use a text_area for editable SQL
+    edited_dml_sql = st.text_area(
+        label="Review and Edit Generated SQL:",
+        value=original_dml_sql,
+        height=150,
+        key="editable_dml_sql"
+    )
+
     st.markdown("**Executing this will alter your database. This is a demonstration and will not actually execute changes.**")
     c1, c2, _ = st.columns([1,1,2])
+
     if c1.button(f"Proceed with {action_verb.capitalize()} (Simulated)", type="primary", use_container_width=True):
-        simulated_result = run_simulated_dml_query(dml_sql, action_verb)
+        # Use the potentially edited SQL from the text_area
+        final_dml_sql = st.session_state.editable_dml_sql
+        simulated_result = run_simulated_dml_query(final_dml_sql, action_verb)
         st.session_state.messages.append({"role": "assistant", "content": {"ai_response": simulated_result}})
         st.session_state.pending_dml_confirmation = None
         st.session_state.current_action = None
@@ -570,6 +615,8 @@ if 'current_action' in st.session_state and st.session_state.current_action:
                         assistant_response_content["ai_response"] = generated_sql
                 elif response_type == "CLARIFICATION_NEEDED_FOR_SELECT" or response_type == "DML_INTENT_DETECTED" or response_type == "GENERAL_RESPONSE":
                     assistant_response_content["ai_response"] = llm_response_json.get("ai_response")
+                elif response_type == "GENERAL_KNOWLEDGE_QUERY": # New condition
+                    assistant_response_content["ai_response"] = llm_response_json.get("ai_response")
                 elif response_type == "DATABASE_OVERVIEW_REQUEST":
                     summary = db_summary_chain.invoke({})
                     assistant_response_content["ai_response"] = f"**Database Overview:**\n\n{summary}"
@@ -581,8 +628,14 @@ if 'current_action' in st.session_state and st.session_state.current_action:
 
         elif action_to_process.startswith("process_initial_dml_description_"):
             with st.spinner("AI is preparing guidance..."):
-                action_verb = "add" if "add" in action_to_process else "delete"
-                action_desc = "adding new data" if action_verb == "add" else "deleting existing data"
+                action_verb = "add"
+                if "delete" in action_to_process: action_verb = "delete"
+                elif "update" in action_to_process: action_verb = "update"
+
+                action_desc = "adding new data"
+                if action_verb == "delete": action_desc = "deleting existing data"
+                elif action_verb == "update": action_desc = "updating existing data"
+
                 initial_desc = st.session_state.dml_initial_description
                 guidance_json = dml_guidance_chain.invoke({
                     "action_type": action_verb,
@@ -596,8 +649,13 @@ if 'current_action' in st.session_state and st.session_state.current_action:
 
         elif action_to_process.startswith("process_structured_dml_"):
             with st.spinner("AI is generating DML command..."):
-                action_verb = "add" if "add" in action_to_process else "delete"
-                action_desc = "adding new data" if action_verb == "add" else "deleting existing data"
+                action_verb = "add"
+                if "delete" in action_to_process: action_verb = "delete"
+                elif "update" in action_to_process: action_verb = "update"
+
+                action_desc = "adding new data"
+                if action_verb == "delete": action_desc = "deleting existing data"
+                elif action_verb == "update": action_desc = "updating existing data"
                 
                 user_structured_details_str = ""
                 if st.session_state.dml_input_method == "form":
@@ -660,6 +718,13 @@ st.sidebar.markdown("""
 5. Provide the details as guided.
 6. Review the generated SQL command and confirm (simulated execution).
 
+**Updating Data:**
+1. Click "🔄 Update Data".
+2. Describe the update (e.g., "update email for customer 10 to 'new@mail.com'").
+3. Get guidance. AI suggests table, fields for SET, and conditions for WHERE.
+4. Provide details using Form or Text. Clearly define SET (new values) and WHERE (which records).
+5. Review and confirm (simulated). **Ensure WHERE clause is specific.**
+
 **Deleting Data:**
 1. Click "➖ Delete Data".
 2. Briefly describe what you want to delete, including specific criteria (e.g., "delete track with ID 5").
@@ -673,7 +738,7 @@ st.sidebar.markdown("""
 **General Questions:**
 - You can ask general questions about the database like "What kind of data does this store?" directly in the chat.
 
-**Important Note:** All Add/Delete operations are **simulated** in this demo and do **not** make actual changes to your database.
+**Important Note:** All Add/Update/Delete operations are **simulated** in this demo and do **not** make actual changes to your database.
 """)
 st.sidebar.markdown("---")
 st.sidebar.caption("Powered by Google Gemini & Langchain")
