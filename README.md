@@ -2,7 +2,7 @@
 
 ## Description
 
-SQL AI Assistant Pro+ is an advanced, AI-powered Streamlit application designed to simplify SQL database interactions. It allows users to query databases using natural language, receive AI-generated SQL, perform simulated data manipulation operations (Add, Update, Delete) with guidance, and even ask general knowledge questions. The assistant is schema-aware and provides an interactive chat interface for a seamless user experience.
+An AI assistant that works on your local mysql database and one that allows you to interact with the data.
 
 ## Features
 
