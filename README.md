@@ -1,4 +1,4 @@
-# SQL AI Assistant Pro+
+# SQL AI Assistant
 
 ## Description
 
